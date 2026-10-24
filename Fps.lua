@@ -26,6 +26,16 @@ local CONFIG = {
 	HopMinutes = 20,   -- hop mỗi bao nhiêu phút
 	RetrySeconds = 10, -- hop lỗi thì thử lại sau bao nhiêu giây
 
+	-- Phát hiện xung đột bay (2 script cùng điều khiển nhân vật) -> hop NGAY
+	ConflictHop = true,  -- bật/tắt tính năng này
+	GraceSeconds = 15,   -- bỏ qua X giây đầu sau khi chạy script / vào server mới
+	CheckMovers = true,  -- cách 1: nhân vật có >= 2 BodyVelocity/BodyPosition/... cùng loại
+	MoverSeconds = 3,    -- ...kéo dài liên tục bao nhiêu giây thì tính là xung đột
+	CheckJitter = true,  -- cách 2: nhân vật bị giật qua lại liên tục
+	JitterStuds = 3,     -- mỗi khung hình phải dịch >= X studs mới tính
+	JitterCount = 20,    -- số lần đổi chiều trong JitterWindow giây thì tính là xung đột
+	JitterWindow = 2,
+
 	-- (Tuỳ chọn) link RAW của script này. Điền vào thì sau khi hop script sẽ tự chạy lại
 	-- (cần executor có queue_on_teleport). Để trống nếu executor của bạn có autoexec.
 	ScriptURL = "",
@@ -244,13 +254,13 @@ local function pickServer()
 	return target
 end
 
-local function serverHop()
+local function serverHop(conflict)
 	if hopping then
 		return
 	end
 	hopping = true
-	hopLabel.Text = "Hop..."
-	hopLabel.TextColor3 = COLORS.Mid
+	hopLabel.Text = conflict and "Conflict!" or "Hop..."
+	hopLabel.TextColor3 = conflict and COLORS.Bad or COLORS.Mid
 
 	task.spawn(function()
 		local target = pickServer()
@@ -281,6 +291,107 @@ table.insert(connections, TeleportService.TeleportInitFailed:Connect(function()
 	nextHop = os.clock() + CONFIG.RetrySeconds
 end))
 
+-- ================= PHÁT HIỆN XUNG ĐỘT BAY =================
+local MOVER_CLASSES = {
+	BodyVelocity = true,
+	BodyPosition = true,
+	BodyGyro = true,
+	LinearVelocity = true,
+	AlignPosition = true,
+}
+
+local startTime = os.clock()
+local blockedUntil = 0
+local lastHrp, lastPos, lastDelta
+local reversals = {}
+local moverSince
+local nextMoverCheck = 0
+
+local function triggerConflict(reason)
+	local now = os.clock()
+	if hopping or now < blockedUntil then
+		return
+	end
+	blockedUntil = now + CONFIG.RetrySeconds
+	reversals = {}
+	moverSince = nil
+	warn("[ServerStatsHUD] Xung dot bay (" .. reason .. ") -> doi server ngay")
+	serverHop(true)
+end
+
+-- Cách 1: có từ 2 mover cùng loại trên nhân vật liên tục (2 script cùng gắn lực bay)
+local function checkMovers(char, now)
+	local counts = {}
+	local dupClass
+	for _, d in ipairs(char:GetDescendants()) do
+		if MOVER_CLASSES[d.ClassName] then
+			counts[d.ClassName] = (counts[d.ClassName] or 0) + 1
+			if counts[d.ClassName] >= 2 then
+				dupClass = d.ClassName
+				break
+			end
+		end
+	end
+	if dupClass then
+		moverSince = moverSince or now
+		if now - moverSince >= CONFIG.MoverSeconds then
+			triggerConflict("2x " .. dupClass)
+		end
+	else
+		moverSince = nil
+	end
+end
+
+-- Cách 2: vị trí giật qua lại liên tục (2 script kéo nhân vật về 2 hướng khác nhau)
+local function checkJitter(hrp, now)
+	local pos = hrp.Position
+	if hrp ~= lastHrp then
+		lastHrp, lastPos, lastDelta = hrp, pos, nil
+		reversals = {}
+		return
+	end
+	local delta = pos - lastPos
+	lastPos = pos
+	if delta.Magnitude >= CONFIG.JitterStuds then
+		if lastDelta and delta:Dot(lastDelta) < 0 then
+			table.insert(reversals, now)
+		end
+		lastDelta = delta
+	else
+		lastDelta = nil
+	end
+	while reversals[1] and now - reversals[1] > CONFIG.JitterWindow do
+		table.remove(reversals, 1)
+	end
+	if #reversals >= CONFIG.JitterCount then
+		triggerConflict("jitter")
+	end
+end
+
+table.insert(connections, RunService.Heartbeat:Connect(function()
+	if not CONFIG.ConflictHop then
+		return
+	end
+	local now = os.clock()
+	if now - startTime < CONFIG.GraceSeconds then
+		return
+	end
+	local char = LocalPlayer.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not (hrp and hum) or hum.Health <= 0 then
+		lastHrp = nil
+		return
+	end
+	if CONFIG.CheckJitter then
+		checkJitter(hrp, now)
+	end
+	if CONFIG.CheckMovers and now >= nextMoverCheck then
+		nextMoverCheck = now + 0.5
+		checkMovers(char, now)
+	end
+end))
+
 -- ================= CẬP NHẬT SỐ LIỆU =================
 local function updatePlayers()
 	playersLabel.Text = ("SV %d/%d"):format(#Players:GetPlayers(), Players.MaxPlayers)
@@ -300,7 +411,7 @@ end
 
 local function updateHop()
 	if not CONFIG.AutoHop then
-		hopLabel.Text = "Hop: tắt"
+		hopLabel.Text = "Hop off"
 		hopLabel.TextColor3 = COLORS.Text
 		return
 	end
