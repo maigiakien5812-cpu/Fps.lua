@@ -1,23 +1,34 @@
 --[[
-	Server Stats HUD
-	Hiện: số người trong server | FPS (xanh/vàng/đỏ) | Ping (xanh/vàng/đỏ)
-	Nằm ngay cạnh nút chat, có nút thu gọn trượt ngang (mặc định mở).
+	Server Stats HUD v2
+	Hiện: số người (SV) | FPS | Ping | đếm ngược hop server
+	Tự hop server mới mỗi 20 phút. Có nút thu gọn trượt ngang (mặc định mở).
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Stats = game:GetService("Stats")
 local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
 -- ================= CẤU HÌNH =================
 local CONFIG = {
-	OffsetX = 172,     -- cách mép trái màn hình (px). Tăng lên nếu bị đè nút chat, giảm nếu cách xa
-	OffsetY = 18,      -- cách mép trên (px). Chỉnh cho thẳng hàng với nút chat
-	Height = 32,       -- chiều cao thanh
+	OffsetX = 172,     -- cách mép trái (px), chỉnh cho nằm sát nút chat
+	OffsetY = 23,      -- cách mép trên (px)
+	Height = 22,       -- chiều cao thanh
+	TextSize = 11,
 	StartOpen = true,  -- mặc định mở
-	UpdateRate = 0.5,  -- giây giữa mỗi lần cập nhật số
+	UpdateRate = 0.5,  -- giây giữa mỗi lần cập nhật
+
+	AutoHop = true,    -- bật/tắt tự hop
+	HopMinutes = 20,   -- hop mỗi bao nhiêu phút
+	RetrySeconds = 10, -- hop lỗi thì thử lại sau bao nhiêu giây
+
+	-- (Tuỳ chọn) link RAW của script này. Điền vào thì sau khi hop script sẽ tự chạy lại
+	-- (cần executor có queue_on_teleport). Để trống nếu executor của bạn có autoexec.
+	ScriptURL = "",
 }
 
 local COLORS = {
@@ -58,8 +69,13 @@ local function getPing()
 	return 0
 end
 
+local function formatTime(s)
+	return ("%02d:%02d"):format(math.floor(s / 60), s % 60)
+end
+
 -- ================= TẠO GIAO DIỆN =================
 local GUI_NAME = "ServerStatsHUD"
+local connections = {}
 
 local function getParent()
 	local ok, ui = pcall(function()
@@ -86,13 +102,13 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = parent
 
 local H = CONFIG.Height
-local HOLDER_WIDTH = 280
+local HOLDER_WIDTH = 224
 
 local root = Instance.new("Frame")
 root.Name = "Root"
 root.BackgroundTransparency = 1
 root.Position = UDim2.fromOffset(CONFIG.OffsetX, CONFIG.OffsetY)
-root.Size = UDim2.fromOffset(H + 4 + HOLDER_WIDTH, H)
+root.Size = UDim2.fromOffset(H + 3 + HOLDER_WIDTH, H)
 root.Parent = gui
 
 -- Nút thu gọn / mở ra
@@ -100,19 +116,18 @@ local toggle = Instance.new("TextButton")
 toggle.Name = "Toggle"
 toggle.AutoButtonColor = false
 toggle.Size = UDim2.fromOffset(H, H)
-toggle.Position = UDim2.fromOffset(0, 0)
 toggle.BackgroundColor3 = COLORS.Back
 toggle.BackgroundTransparency = 0.3
 toggle.BorderSizePixel = 0
 toggle.Font = Enum.Font.GothamBold
-toggle.TextSize = 18
+toggle.TextSize = 14
 toggle.TextColor3 = COLORS.Text
 toggle.Text = "<"
 toggle.ZIndex = 3
 toggle.Parent = root
 
 local toggleCorner = Instance.new("UICorner")
-toggleCorner.CornerRadius = UDim.new(0, 8)
+toggleCorner.CornerRadius = UDim.new(0, 6)
 toggleCorner.Parent = toggle
 
 -- Khung cắt: phần nội dung trượt vào/ra trong khung này
@@ -120,7 +135,7 @@ local holder = Instance.new("Frame")
 holder.Name = "Holder"
 holder.BackgroundTransparency = 1
 holder.ClipsDescendants = true
-holder.Position = UDim2.fromOffset(H + 4, 0)
+holder.Position = UDim2.fromOffset(H + 3, 0)
 holder.Size = UDim2.fromOffset(HOLDER_WIDTH, H)
 holder.Parent = root
 
@@ -133,7 +148,7 @@ content.Size = UDim2.fromScale(1, 1)
 content.Parent = holder
 
 local contentCorner = Instance.new("UICorner")
-contentCorner.CornerRadius = UDim.new(0, 8)
+contentCorner.CornerRadius = UDim.new(0, 6)
 contentCorner.Parent = content
 
 local layout = Instance.new("UIListLayout")
@@ -141,12 +156,12 @@ layout.FillDirection = Enum.FillDirection.Horizontal
 layout.VerticalAlignment = Enum.VerticalAlignment.Center
 layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
 layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Padding = UDim.new(0, 4)
+layout.Padding = UDim.new(0, 2)
 layout.Parent = content
 
 local pad = Instance.new("UIPadding")
-pad.PaddingLeft = UDim.new(0, 8)
-pad.PaddingRight = UDim.new(0, 8)
+pad.PaddingLeft = UDim.new(0, 6)
+pad.PaddingRight = UDim.new(0, 6)
 pad.Parent = content
 
 local function makeLabel(order, width)
@@ -155,7 +170,7 @@ local function makeLabel(order, width)
 	l.BackgroundTransparency = 1
 	l.Size = UDim2.new(0, width, 1, 0)
 	l.Font = Enum.Font.GothamBold
-	l.TextSize = 14
+	l.TextSize = CONFIG.TextSize
 	l.TextColor3 = COLORS.Text
 	l.TextXAlignment = Enum.TextXAlignment.Center
 	l.Text = "..."
@@ -163,9 +178,10 @@ local function makeLabel(order, width)
 	return l
 end
 
-local playersLabel = makeLabel(1, 108)
-local fpsLabel = makeLabel(2, 64)
-local pingLabel = makeLabel(3, 88)
+local playersLabel = makeLabel(1, 54)
+local fpsLabel = makeLabel(2, 48)
+local pingLabel = makeLabel(3, 42)
+local hopLabel = makeLabel(4, 62)
 
 -- ================= THU GỌN / MỞ RA =================
 local isOpen = CONFIG.StartOpen
@@ -185,19 +201,94 @@ end
 
 applyState(false)
 
-toggle.Activated:Connect(function()
+table.insert(connections, toggle.Activated:Connect(function()
 	isOpen = not isOpen
 	applyState(true)
-end)
+end))
+
+-- ================= HOP SERVER =================
+local INTERVAL = math.max(1, CONFIG.HopMinutes) * 60
+local nextHop = os.clock() + INTERVAL
+local hopping = false
+
+local function queueScript()
+	if CONFIG.ScriptURL == "" then
+		return
+	end
+	pcall(function()
+		local queue = queue_on_teleport
+			or (syn and syn.queue_on_teleport)
+			or (fluxus and fluxus.queue_on_teleport)
+		if queue then
+			queue(('loadstring(game:HttpGet("%s"))()'):format(CONFIG.ScriptURL))
+		end
+	end)
+end
+
+local function pickServer()
+	local target
+	pcall(function()
+		local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true")
+			:format(game.PlaceId)
+		local data = HttpService:JSONDecode(game:HttpGet(url))
+		local candidates = {}
+		for _, s in ipairs(data.data or {}) do
+			if s.id ~= game.JobId and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
+				table.insert(candidates, s.id)
+			end
+		end
+		if #candidates > 0 then
+			target = candidates[math.random(#candidates)]
+		end
+	end)
+	return target
+end
+
+local function serverHop()
+	if hopping then
+		return
+	end
+	hopping = true
+	hopLabel.Text = "Hop..."
+	hopLabel.TextColor3 = COLORS.Mid
+
+	task.spawn(function()
+		local target = pickServer()
+		queueScript()
+		if target then
+			pcall(function()
+				TeleportService:TeleportToPlaceInstance(game.PlaceId, target, LocalPlayer)
+			end)
+		else
+			-- không lấy được danh sách server -> teleport thường
+			pcall(function()
+				TeleportService:Teleport(game.PlaceId, LocalPlayer)
+			end)
+		end
+
+		-- nếu 20s sau vẫn chưa đi được thì thử lại
+		task.delay(20, function()
+			if hopping then
+				hopping = false
+				nextHop = os.clock() + CONFIG.RetrySeconds
+			end
+		end)
+	end)
+end
+
+table.insert(connections, TeleportService.TeleportInitFailed:Connect(function()
+	hopping = false
+	nextHop = os.clock() + CONFIG.RetrySeconds
+end))
 
 -- ================= CẬP NHẬT SỐ LIỆU =================
 local function updatePlayers()
-	playersLabel.Text = ("Players %d/%d"):format(#Players:GetPlayers(), Players.MaxPlayers)
+	playersLabel.Text = ("SV %d/%d"):format(#Players:GetPlayers(), Players.MaxPlayers)
 end
 
 local function updatePing()
 	local ms = getPing()
-	pingLabel.Text = ("Ping %dms"):format(ms)
+	pingLabel.Text = ("%dms"):format(ms)
 	pingLabel.TextColor3 = pingColor(ms)
 end
 
@@ -207,15 +298,38 @@ local function updateFps(fps)
 	fpsLabel.TextColor3 = fpsColor(fps)
 end
 
+local function updateHop()
+	if not CONFIG.AutoHop then
+		hopLabel.Text = "Hop: tắt"
+		hopLabel.TextColor3 = COLORS.Text
+		return
+	end
+	if hopping then
+		return
+	end
+	local remaining = math.max(0, math.ceil(nextHop - os.clock()))
+	hopLabel.Text = "Hop " .. formatTime(remaining)
+	if remaining <= 10 then
+		hopLabel.TextColor3 = COLORS.Bad
+	elseif remaining <= 60 then
+		hopLabel.TextColor3 = COLORS.Mid
+	else
+		hopLabel.TextColor3 = COLORS.Text
+	end
+	if remaining <= 0 then
+		serverHop()
+	end
+end
+
 updatePlayers()
 updatePing()
 updateFps(60)
+updateHop()
 
 local frames = 0
 local last = os.clock()
 
-local conn
-conn = RunService.RenderStepped:Connect(function()
+table.insert(connections, RunService.RenderStepped:Connect(function()
 	frames += 1
 	local now = os.clock()
 	local dt = now - last
@@ -223,18 +337,19 @@ conn = RunService.RenderStepped:Connect(function()
 		updateFps(frames / dt)
 		updatePing()
 		updatePlayers()
+		updateHop()
 		frames = 0
 		last = now
 	end
-end)
+end))
 
-Players.PlayerAdded:Connect(updatePlayers)
-Players.PlayerRemoving:Connect(function()
+table.insert(connections, Players.PlayerAdded:Connect(updatePlayers))
+table.insert(connections, Players.PlayerRemoving:Connect(function()
 	task.defer(updatePlayers)
-end)
+end))
 
 gui.Destroying:Connect(function()
-	if conn then
-		conn:Disconnect()
+	for _, c in ipairs(connections) do
+		c:Disconnect()
 	end
 end)
