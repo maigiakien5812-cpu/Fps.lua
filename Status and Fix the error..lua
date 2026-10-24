@@ -24,7 +24,8 @@ local CONFIG = {
 
 	AutoHop = true,    -- bật/tắt tự hop
 	HopMinutes = 20,   -- hop mỗi bao nhiêu phút
-	RetrySeconds = 10, -- hop lỗi thì thử lại sau bao nhiêu giây
+	RetrySeconds = 10, -- hop lỗi thì thử lại sau bao nhiêu giây (lỗi càng nhiều lần thì chờ càng lâu)
+	MinPlayers = 2,    -- ưu tiên server có từ X người trở lên (server gần trống hay sắp đóng nên dễ lỗi)
 
 	-- Phát hiện xung đột bay (2 script cùng điều khiển nhân vật) -> hop NGAY
 	ConflictHop = true,  -- bật/tắt tính năng này
@@ -220,6 +221,10 @@ end))
 local INTERVAL = math.max(1, CONFIG.HopMinutes) * 60
 local nextHop = os.clock() + INTERVAL
 local hopping = false
+local failedIds = {}  -- server đã thử mà bị từ chối -> không chọn lại
+local attempts = 0    -- số lần hop lỗi liên tiếp
+local lastTarget      -- server vừa thử
+local retryAt = 0     -- chưa được hop lại trước mốc này
 
 local function queueScript()
 	if CONFIG.ScriptURL == "" then
@@ -237,20 +242,31 @@ end
 
 local function pickServer()
 	local target
-	pcall(function()
+	local ok, err = pcall(function()
 		local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true")
 			:format(game.PlaceId)
 		local data = HttpService:JSONDecode(game:HttpGet(url))
-		local candidates = {}
+		local strict, loose = {}, {}
 		for _, s in ipairs(data.data or {}) do
-			if s.id ~= game.JobId and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
-				table.insert(candidates, s.id)
+			if s.id ~= game.JobId
+				and not failedIds[s.id]
+				and s.playing and s.maxPlayers
+				and s.playing < s.maxPlayers then
+				table.insert(loose, s.id)
+				-- server "đẹp": không quá trống, còn dư chỗ để khỏi đầy lúc đang vào
+				if s.playing >= CONFIG.MinPlayers and s.playing <= s.maxPlayers - 2 then
+					table.insert(strict, s.id)
+				end
 			end
 		end
-		if #candidates > 0 then
-			target = candidates[math.random(#candidates)]
+		local pool = #strict > 0 and strict or loose
+		if #pool > 0 then
+			target = pool[math.random(#pool)]
 		end
 	end)
+	if not ok then
+		warn("[ServerStatsHUD] Lay danh sach server loi: " .. tostring(err))
+	end
 	return target
 end
 
@@ -263,7 +279,12 @@ local function serverHop(conflict)
 	hopLabel.TextColor3 = conflict and COLORS.Bad or COLORS.Mid
 
 	task.spawn(function()
-		local target = pickServer()
+		-- sau 3 lần lỗi liên tiếp thì bỏ qua danh sách, dùng teleport thường cho chắc
+		local target
+		if attempts < 3 then
+			target = pickServer()
+		end
+		lastTarget = target
 		queueScript()
 		if target then
 			pcall(function()
@@ -279,16 +300,30 @@ local function serverHop(conflict)
 		-- nếu 20s sau vẫn chưa đi được thì thử lại
 		task.delay(20, function()
 			if hopping then
+				-- 20s mà vẫn chưa đi được: coi như hop lỗi (kể cả khi Roblox không báo lỗi)
+				attempts += 1
+				if lastTarget then
+					failedIds[lastTarget] = true
+				end
+				local wait = math.min(CONFIG.RetrySeconds * attempts, 60)
 				hopping = false
-				nextHop = os.clock() + CONFIG.RetrySeconds
+				nextHop = os.clock() + wait
+				retryAt = os.clock() + wait
 			end
 		end)
 	end)
 end
 
-table.insert(connections, TeleportService.TeleportInitFailed:Connect(function()
+table.insert(connections, TeleportService.TeleportInitFailed:Connect(function(_, result, message)
+	attempts += 1
+	if lastTarget then
+		failedIds[lastTarget] = true
+	end
+	warn(("[ServerStatsHUD] Hop loi lan %d (%s): %s"):format(attempts, tostring(result), tostring(message)))
+	local wait = math.min(CONFIG.RetrySeconds * attempts, 60) -- 10s, 20s, 30s... tối đa 60s
 	hopping = false
-	nextHop = os.clock() + CONFIG.RetrySeconds
+	nextHop = os.clock() + wait
+	retryAt = os.clock() + wait
 end))
 
 -- ================= PHÁT HIỆN XUNG ĐỘT BAY =================
@@ -309,7 +344,7 @@ local nextMoverCheck = 0
 
 local function triggerConflict(reason)
 	local now = os.clock()
-	if hopping or now < blockedUntil then
+	if hopping or now < blockedUntil or now < retryAt then
 		return
 	end
 	blockedUntil = now + CONFIG.RetrySeconds
