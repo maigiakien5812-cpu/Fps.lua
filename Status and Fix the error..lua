@@ -1,4 +1,5 @@
--- Server Stats HUD v4 - Blox Fruits / Delta (Android)
+-- Server Stats HUD v4.1 - Blox Fruits / Delta (Android)
+-- Them nut HOP thu cong va thong bao trang thai hop.
 -- HUD SV/FPS/Ping/Hop; auto-hop theo chu ky; retry sau 20s neu that bai.
 -- Phat hien giat qua lai thi thu reset nhan vat, khong hop server vi ly do nay.
 -- Luu y: giao thuc Server Browser noi bo co the thay doi; khong dam bao hop thanh cong.
@@ -99,7 +100,7 @@ local function run()
     if old then old:Destroy() end
 
     local H = CONFIG.Height
-    local WIDTH_ON, WIDTH_OFF = 248, 184
+    local WIDTH_ON, WIDTH_OFF = 326, 262
     local hopEnabled = CONFIG.AutoHop
     local holderWidth = hopEnabled and WIDTH_ON or WIDTH_OFF
     local gui = make("ScreenGui", {
@@ -161,6 +162,14 @@ local function run()
     make("UICorner", {CornerRadius = UDim.new(0, 3)}, switchBox)
     local switchStroke = make("UIStroke", {Color = COLORS.Good, Thickness = 1.5}, switchBox)
     local hopLabel = makeLabel(5, 62)
+    local manualHopBtn = make("TextButton", {
+        LayoutOrder = 6, AutoButtonColor = true,
+        BackgroundColor3 = Color3.fromRGB(35, 105, 190),
+        BorderSizePixel = 0, Size = UDim2.new(0, 54, 1, -4),
+        Font = Enum.Font.GothamBold, TextSize = 10,
+        TextColor3 = COLORS.Text, Text = "HOP",
+    }, content)
+    make("UICorner", {CornerRadius = UDim.new(0, 5)}, manualHopBtn)
 
     local isOpen = CONFIG.StartOpen
     local tweenInfo = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -272,13 +281,17 @@ local function run()
         notify("Hop that bai. Thu lai sau 20 giay")
     end
 
-    local function serverHop()
-        if hopping or not hopEnabled then return end
+    local function serverHop(manual)
+        if hopping or (not hopEnabled and not manual) then
+            if hopping then notify("Dang co yeu cau hop, cho chut nha") end
+            return
+        end
         hopping = true
         hopToken = hopToken + 1
         local myToken = hopToken
         hopLabel.Text = "Hop..."
         hopLabel.TextColor3 = COLORS.Mid
+        notify(manual and "Dang thu doi server theo yeu cau..." or "Dang thu doi server tu dong...")
         task.spawn(function()
             local issued, reason = false, "Khong co phuong thuc hop thanh cong"
             if CONFIG.UseGameBrowser then
@@ -306,8 +319,10 @@ local function run()
             end
             if not issued then
                 scheduleRetry(reason)
+                notify("Hop chua gui duoc: " .. string.sub(tostring(reason), 1, 90) .. ". Thu lai sau 20s")
                 return
             end
+            notify("Da gui yeu cau doi server. Dang cho Roblox xu ly...")
             task.delay(25, function()
                 if hopping and hopToken == myToken then
                     scheduleRetry("Qua 25 giay chua chuyen server")
@@ -317,7 +332,14 @@ local function run()
     end
 
     table.insert(connections, TeleportService.TeleportInitFailed:Connect(function(_, result, message)
-        if hopping then scheduleRetry(tostring(result) .. " | " .. tostring(message)) end
+        if hopping then
+            scheduleRetry(tostring(result) .. " | " .. tostring(message))
+            notify("Roblox tu choi hop: " .. tostring(result) .. ". Thu lai sau 20s")
+        end
+    end))
+
+    table.insert(connections, manualHopBtn.Activated:Connect(function()
+        serverHop(true)
     end))
 
     -- Phat hien di chuyen giat qua lai: reset nhan vat thay vi hop server.
@@ -378,7 +400,7 @@ local function run()
     end
 
     table.insert(connections, RunService.Heartbeat:Connect(function()
-        if not hopEnabled or not CONFIG.ConflictReset or os.clock() - startTime < CONFIG.GraceSeconds then return end
+        if not CONFIG.ConflictReset or os.clock() - startTime < CONFIG.GraceSeconds then return end
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -446,7 +468,7 @@ local function run()
     gui.Destroying:Connect(function()
         for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     end)
-    notify("HUD da chay - v4")
+    notify("HUD v4.1 da chay - bam HOP de test")
 end
 
 local ok, err = xpcall(run, function(e)
