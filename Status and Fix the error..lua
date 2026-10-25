@@ -19,11 +19,13 @@ local CONFIG = {
 	StartOpen = true,    -- mac dinh mo
 	UpdateRate = 0.5,
 	UseHiddenUI = false, -- true = dung gethui() (neu HUD khong hien thi thi de false)
+	UseGameBrowser = true, -- hop bang Server Browser cua chinh Blox Fruits (tranh loi 773)
 
 	AutoHop = true,
 	HopMinutes = 20,
 	RetrySeconds = 10,   -- hop loi thi thu lai sau X giay (loi nhieu lan thi cho lau hon)
 	MinPlayers = 2,      -- uu tien server tu X nguoi tro len
+	MaxFailures = 8,     -- hop loi lien tiep qua X lan thi tu tat hop (bam o vuong de bat lai)
 
 	ConflictHop = true,  -- phat hien xung dot bay -> hop ngay
 	GraceSeconds = 15,   -- bo qua X giay dau
@@ -318,10 +320,66 @@ local function run()
 			failedIds[lastTarget] = true
 		end
 		warn("[ServerStatsHUD] Hop loi lan " .. attempts .. ": " .. tostring(reason))
+		if attempts >= CONFIG.MaxFailures then
+			-- loi qua nhieu lan: tu tat hop de khong hien bang loi lien tuc
+			hopping = false
+			hopEnabled = false
+			applySwitch(true)
+			notify("Hop loi " .. attempts .. " lan, da tat hop")
+			return
+		end
 		local delayTime = math.min(CONFIG.RetrySeconds * attempts, 60)
 		hopping = false
 		nextHop = os.clock() + delayTime
 		retryAt = nextHop
+	end
+
+	-- Hop bang Server Browser cua game (game tu dich chuyen tu phia server, khong bi loi 773).
+	-- Tra ve true neu da gui lenh dich chuyen.
+	local function hopViaBrowser()
+		local browser = game:GetService("ReplicatedStorage"):FindFirstChild("__ServerBrowser", true)
+		if not browser then
+			return false
+		end
+		local maxP = Players.MaxPlayers
+		local strict, loose = {}, {}
+		for page = 1, 4 do
+			local ok, servers = pcall(function()
+				return browser:InvokeServer(page)
+			end)
+			if not ok or type(servers) ~= "table" then
+				break
+			end
+			local any = false
+			for id, info in pairs(servers) do
+				any = true
+				local count = type(info) == "table" and tonumber(info.Count) or nil
+				if count and id ~= game.JobId and not failedIds[id] and count < maxP then
+					table.insert(loose, id)
+					if count >= CONFIG.MinPlayers and count <= maxP - 2 then
+						table.insert(strict, id)
+					end
+				end
+			end
+			if not any or #strict >= 10 then
+				break
+			end
+		end
+		local pool = #strict > 0 and strict or loose
+		if #pool == 0 then
+			return false
+		end
+		local target = pool[math.random(#pool)]
+		lastTarget = target
+		queueScript()
+		local ok, err = pcall(function()
+			browser:InvokeServer("teleport", target)
+		end)
+		if not ok then
+			warn("[ServerStatsHUD] Server Browser teleport loi: " .. tostring(err))
+			return false
+		end
+		return true
 	end
 
 	local function serverHop(conflict)
@@ -335,22 +393,30 @@ local function run()
 		hopLabel.TextColor3 = conflict and COLORS.Bad or COLORS.Mid
 
 		task.spawn(function()
-			local target = nil
-			if attempts < 3 then
-				target = pickServer()
+			local issued = false
+			if CONFIG.UseGameBrowser and attempts < 4 then
+				local okB, res = pcall(hopViaBrowser)
+				issued = okB and res == true
 			end
-			lastTarget = target
-			queueScript()
-			pcall(function()
-				if target then
-					TeleportService:TeleportToPlaceInstance(game.PlaceId, target, LocalPlayer)
-				else
-					TeleportService:Teleport(game.PlaceId, LocalPlayer)
+			if not issued then
+				-- du phong: dich chuyen bang TeleportService (de bi loi 773 trong Blox Fruits)
+				local target = nil
+				if attempts < 3 then
+					target = pickServer()
 				end
-			end)
-			task.delay(20, function()
+				lastTarget = target
+				queueScript()
+				pcall(function()
+					if target then
+						TeleportService:TeleportToPlaceInstance(game.PlaceId, target, LocalPlayer)
+					else
+						TeleportService:Teleport(game.PlaceId, LocalPlayer)
+					end
+				end)
+			end
+			task.delay(30, function()
 				if hopping and hopId == myId then
-					onHopFailed("qua 20s chua di duoc")
+					onHopFailed("qua 30s chua di duoc")
 				end
 			end)
 		end)
