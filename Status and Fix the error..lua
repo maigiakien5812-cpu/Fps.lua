@@ -19,10 +19,10 @@ local CONFIG = {
     IgnoreAfterSeatSeconds = 3,
     IgnoreAfterSpawnSeconds = 5,
     StuckSeconds = 100,
-    MinMoveStuds = 40,
+    MinMoveStuds = 70,
     RingSegments = 72,
     RingDotSize = 0.7,
-    RingRefreshDelay = 10,
+    RingRefreshDelay = 3,
 }
 
 local function notify(msg)
@@ -235,7 +235,7 @@ local function run()
         local label = Instance.new("TextLabel")
         label.Size = UDim2.fromScale(1, 1)
         label.BackgroundTransparency = 1
-        label.Text = "40 STUDS"
+        label.Text = "70 STUDS"
         label.TextColor3 = Color3.fromRGB(0, 255, 255)
         label.TextStrokeTransparency = 0
         label.TextScaled = true
@@ -326,7 +326,7 @@ local function run()
         end
 
         if now - stuckSince >= CONFIG.StuckSeconds and horizontalDistance < CONFIG.MinMoveStuds then
-            resetCharacter("inside-40-stud-ring-100s")
+            resetCharacter("inside-70-stud-ring-100s")
             return
         end
 
