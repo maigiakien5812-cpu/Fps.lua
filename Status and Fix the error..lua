@@ -115,7 +115,10 @@ local function run()
 	end
 
 	local H = CONFIG.Height
-	local HOLDER_WIDTH = 224
+	local WIDTH_ON = 248   -- do rong khung khi hop BAT (co o vuong + dong ho)
+	local WIDTH_OFF = 184  -- do rong khung khi hop TAT (chi con o vuong)
+	local hopEnabled = CONFIG.AutoHop
+	local HOLDER_WIDTH = hopEnabled and WIDTH_ON or WIDTH_OFF
 
 	local gui = make("ScreenGui", {
 		Name = GUI_NAME,
@@ -184,7 +187,26 @@ local function run()
 	local playersLabel = makeLabel(1, 54)
 	local fpsLabel = makeLabel(2, 48)
 	local pingLabel = makeLabel(3, 42)
-	local hopLabel = makeLabel(4, 62)
+
+	-- O vuong nho bat/tat hop: bat = to day mau, tat = chi con khung vien
+	local switchBtn = make("TextButton", {
+		LayoutOrder = 4,
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Text = "",
+		Size = UDim2.new(0, 22, 1, 0),
+	}, content)
+	local switchBox = make("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(12, 12),
+		BorderSizePixel = 0,
+		BackgroundColor3 = COLORS.Good,
+	}, switchBtn)
+	make("UICorner", { CornerRadius = UDim.new(0, 3) }, switchBox)
+	local switchStroke = make("UIStroke", { Color = COLORS.Good, Thickness = 1.5 }, switchBox)
+
+	local hopLabel = makeLabel(5, 62)
 
 	-- ============ THU GON / MO RA ============
 	local isOpen = CONFIG.StartOpen
@@ -203,13 +225,35 @@ local function run()
 	end
 	applyState(false)
 
+	-- Ve lai o vuong + dong ho theo trang thai bat/tat hop
+	local function applySwitch(animate)
+		if hopEnabled then
+			switchBox.BackgroundTransparency = 0
+			switchBox.BackgroundColor3 = COLORS.Good
+			switchStroke.Color = COLORS.Good
+			hopLabel.Visible = true
+		else
+			switchBox.BackgroundTransparency = 1
+			switchStroke.Color = COLORS.Text
+			hopLabel.Visible = false
+		end
+		local size = UDim2.fromOffset(hopEnabled and WIDTH_ON or WIDTH_OFF, H)
+		if animate then
+			TweenService:Create(holder, tweenInfo, { Size = size }):Play()
+		else
+			holder.Size = size
+		end
+	end
+	applySwitch(false)
+
 	table.insert(connections, toggle.Activated:Connect(function()
 		isOpen = not isOpen
 		applyState(true)
 	end))
 
 	-- ============ HOP SERVER ============
-	local nextHop = os.clock() + math.max(1, CONFIG.HopMinutes) * 60
+	local INTERVAL = math.max(1, CONFIG.HopMinutes) * 60
+	local nextHop = os.clock() + INTERVAL
 	local hopping = false
 	local hopId = 0
 	local failedIds = {}
@@ -327,7 +371,7 @@ local function run()
 
 	local function triggerConflict(reason)
 		local now = os.clock()
-		if hopping or now < blockedUntil or now < retryAt then
+		if hopping or not hopEnabled or now < blockedUntil or now < retryAt then
 			return
 		end
 		blockedUntil = now + CONFIG.RetrySeconds
@@ -385,7 +429,7 @@ local function run()
 	end
 
 	table.insert(connections, RunService.Heartbeat:Connect(function()
-		if not CONFIG.ConflictHop then
+		if not CONFIG.ConflictHop or not hopEnabled then
 			return
 		end
 		local now = os.clock()
@@ -408,6 +452,23 @@ local function run()
 		end
 	end))
 
+	-- ============ NUT BAT/TAT HOP ============
+	table.insert(connections, switchBtn.Activated:Connect(function()
+		hopEnabled = not hopEnabled
+		if hopEnabled then
+			-- bat lai: dem nguoc lai tu dau, xoa trang thai cu
+			attempts = 0
+			retryAt = 0
+			nextHop = os.clock() + INTERVAL
+			reversals = {}
+			moverSince = nil
+			lastHrp = nil
+			hopLabel.Text = "Hop " .. formatTime(INTERVAL)
+			hopLabel.TextColor3 = COLORS.Text
+		end
+		applySwitch(true)
+	end))
+
 	-- ============ CAP NHAT SO LIEU ============
 	local function updatePlayers()
 		playersLabel.Text = string.format("SV %d/%d", #Players:GetPlayers(), Players.MaxPlayers)
@@ -426,9 +487,7 @@ local function run()
 	end
 
 	local function updateHop()
-		if not CONFIG.AutoHop then
-			hopLabel.Text = "Hop off"
-			hopLabel.TextColor3 = COLORS.Text
+		if not hopEnabled then
 			return
 		end
 		if hopping then
