@@ -1,4 +1,4 @@
--- Server Stats HUD v4.1 - Blox Fruits / Delta (Android)
+-- Server Stats HUD v4.2 - hop feedback + retry guard
 -- Them nut HOP thu cong va thong bao trang thai hop.
 -- HUD SV/FPS/Ping/Hop; auto-hop theo chu ky; retry sau 20s neu that bai.
 -- Phat hien giat qua lai thi thu reset nhan vat, khong hop server vi ly do nay.
@@ -210,6 +210,7 @@ local function run()
     local lastTarget = nil
     local retryAt = 0
     local hopToken = 0
+    local initialJobId = game.JobId
 
     local function queueScript()
         if CONFIG.ScriptURL == "" then return end
@@ -265,14 +266,20 @@ local function run()
         lastTarget = target
         queueScript()
         local ok, result = pcall(function() return browser:InvokeServer("teleport", target) end)
-        if not ok then return false, tostring(result) end
-        return true
+        if not ok then return false, "Browser teleport invoke loi: " .. tostring(result) end
+        -- Khong mac dinh coi moi phan hoi la thanh cong; mot so remote tra false/error text.
+        if result == false then return false, "Server Browser tu choi yeu cau teleport" end
+        if type(result) == "string" and result:lower():find("error") then
+            return false, "Server Browser bao loi: " .. result
+        end
+        return true, nil
     end
 
     local function scheduleRetry(reason)
+        if not hopping then return end -- tranh event + timeout cung tinh la 2 lan loi
+        hopping = false
         attempts = attempts + 1
         if lastTarget then failedIds[lastTarget] = true end
-        hopping = false
         retryAt = os.clock() + CONFIG.RetrySeconds
         nextHop = retryAt
         hopLabel.Text = "Retry 00:20"
@@ -322,7 +329,7 @@ local function run()
                 notify("Hop chua gui duoc: " .. string.sub(tostring(reason), 1, 90) .. ". Thu lai sau 20s")
                 return
             end
-            notify("Da gui yeu cau doi server. Dang cho Roblox xu ly...")
+            notify("Da gui lenh hop. Neu sau 25s van o server cu, se thu lai sau 20s.")
             task.delay(25, function()
                 if hopping and hopToken == myToken then
                     scheduleRetry("Qua 25 giay chua chuyen server")
@@ -335,6 +342,18 @@ local function run()
         if hopping then
             scheduleRetry(tostring(result) .. " | " .. tostring(message))
             notify("Roblox tu choi hop: " .. tostring(result) .. ". Thu lai sau 20s")
+        end
+    end))
+
+    -- Neu game.Place/JobId doi thi teleport da thanh cong; khong de timeout cu chay tiep.
+    table.insert(connections, RunService.Heartbeat:Connect(function()
+        if hopping and game.JobId ~= initialJobId then
+            initialJobId = game.JobId
+            hopping = false
+            attempts = 0
+            retryAt = 0
+            nextHop = os.clock() + INTERVAL
+            notify("Da vao server moi!")
         end
     end))
 
@@ -465,16 +484,4 @@ local function run()
     end))
     table.insert(connections, Players.PlayerAdded:Connect(updatePlayers))
     table.insert(connections, Players.PlayerRemoving:Connect(function() task.defer(updatePlayers) end))
-    gui.Destroying:Connect(function()
-        for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
-    end)
-    notify("HUD v4.1 da chay - bam HOP de test")
-end
-
-local ok, err = xpcall(run, function(e)
-    return tostring(e) .. "\n" .. tostring(debug.traceback())
-end)
-if not ok then
-    warn("[ServerStatsHUD] LOI: " .. tostring(err))
-    notify("Loi: " .. string.sub(tostring(err), 1, 150))
-end
+    gui.Destroy
