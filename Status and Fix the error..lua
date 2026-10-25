@@ -1,5 +1,5 @@
--- Server Stats HUD v4.6 - elapsed timer + movement watchdog
--- No server-hop controls; reset after prolonged insufficient movement.
+-- Server Stats HUD v4.9 - visible 15-stud ring only
+-- Removed all abnormal-movement detection. Reset is based only on the fixed horizontal ring.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -16,19 +16,13 @@ local CONFIG = {
     GraceSeconds = 15,
     ResetCooldown = 25,
 
-    -- Conservative detector: count only large reversals while moving,
-    -- require repeated events over a window, then confirm after 2 seconds.
-    JitterStuds = 3,
-    JitterCount = 3,
-    JitterWindow = 5,
-    ConfirmSeconds = 2,
-    SnapStuds = 5,
-    SnapCount = 3,
-    SnapWindow = 8,
     IgnoreAfterSeatSeconds = 3,
     IgnoreAfterSpawnSeconds = 5,
-    StuckSeconds = 60,
-    MinMoveStuds = 8,
+    StuckSeconds = 100,
+    MinMoveStuds = 40,
+    RingSegments = 72,
+    RingDotSize = 0.7,
+    RingRefreshDelay = 10,
 }
 
 local function notify(msg)
@@ -161,23 +155,95 @@ local function run()
     -- Elapsed timer starts when the HUD is initialized and counts up indefinitely.
     local timerStartedAt = os.clock()
 
-    -- Conservative conflict reset: one detector only. Ignore seat transitions,
-    -- respawns, and small movement. Require 3 large direction reversals in 5s,
-    -- then verify instability continues for 2s before resetting.
+    -- Reset logic uses only the visible fixed ring; no abnormal-movement detector.
     local startTime = os.clock()
-    local lastHrp, lastPos, lastDelta = nil,nil,nil
-    local reversals = {}
     local lastReset = -math.huge
-    local pendingSince = nil
     local lastSeatState = nil
     local characterReadyAt = startTime + CONFIG.IgnoreAfterSpawnSeconds
     local stuckAnchorPos = nil
     local stuckSince = startTime
+    local ringFolder = nil
+    local ringDots = {}
+    local outsideSince = nil
+
+    local function destroyRing()
+        if ringFolder then
+            pcall(function() ringFolder:Destroy() end)
+        end
+        ringFolder = nil
+        ringDots = {}
+    end
+
+    local function createRing(center)
+        destroyRing()
+        local folder = Instance.new("Folder")
+        folder.Name = "ServerStatsHUD_StuckRing"
+        folder.Parent = workspace
+        ringFolder = folder
+        local radius = CONFIG.MinMoveStuds
+        local rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        rayParams.FilterDescendantsInstances = {folder, LocalPlayer.Character}
+        rayParams.IgnoreWater = false
+
+        for i = 1, CONFIG.RingSegments do
+            local angle = (i / CONFIG.RingSegments) * math.pi * 2
+            local x = center.X + math.cos(angle) * radius
+            local z = center.Z + math.sin(angle) * radius
+            -- Raycast downward so the ring sits visibly above uneven terrain.
+            local origin = Vector3.new(x, center.Y + 80, z)
+            local hit = workspace:Raycast(origin, Vector3.new(0, -300, 0), rayParams)
+            local y = hit and (hit.Position.Y + 0.8) or (center.Y - 2.5)
+
+            local dot = Instance.new("Part")
+            dot.Name = "RingDot"
+            dot.Shape = Enum.PartType.Ball
+            dot.Size = Vector3.new(CONFIG.RingDotSize, CONFIG.RingDotSize, CONFIG.RingDotSize)
+            dot.Anchored = true
+            dot.CanCollide = false
+            dot.CanTouch = false
+            dot.CanQuery = false
+            dot.CastShadow = false
+            dot.Material = Enum.Material.Neon
+            dot.Color = Color3.fromRGB(0, 255, 255)
+            dot.Transparency = 0
+            dot.Position = Vector3.new(x, y, z)
+            dot.Parent = folder
+            table.insert(ringDots, dot)
+        end
+
+        local marker = Instance.new("Part")
+        marker.Name = "RingCenterMarker"
+        marker.Size = Vector3.new(0.25, 0.25, 0.25)
+        marker.Shape = Enum.PartType.Ball
+        marker.Anchored = true
+        marker.CanCollide = false
+        marker.CanTouch = false
+        marker.CanQuery = false
+        marker.CastShadow = false
+        marker.Material = Enum.Material.Neon
+        marker.Color = Color3.fromRGB(255, 190, 45)
+        marker.Position = center
+        marker.Parent = folder
+
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "RingLabel"
+        billboard.Size = UDim2.fromOffset(120, 30)
+        billboard.StudsOffset = Vector3.new(0, 4, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Parent = marker
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.fromScale(1, 1)
+        label.BackgroundTransparency = 1
+        label.Text = "40 STUDS"
+        label.TextColor3 = Color3.fromRGB(0, 255, 255)
+        label.TextStrokeTransparency = 0
+        label.TextScaled = true
+        label.Font = Enum.Font.GothamBold
+        label.Parent = billboard
+    end
 
     local function clearMovementState()
-        lastHrp, lastPos, lastDelta = nil,nil,nil
-        reversals = {}
-        pendingSince = nil
     end
 
     local function resetCharacter(reason)
@@ -187,10 +253,11 @@ local function run()
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not hum or hum.Health <= 0 then return end
         lastReset = now
-        pendingSince = nil
         clearMovementState()
         stuckAnchorPos = nil
         stuckSince = now
+        outsideSince = nil
+        destroyRing()
         notify("Reset nhan vat: "..reason)
         -- Keep the existing reset behavior; server/executor may disallow client-side health changes.
         local ok = pcall(function() hum.Health = 0 end)
@@ -203,6 +270,8 @@ local function run()
         clearMovementState()
         stuckAnchorPos = nil
         stuckSince = os.clock()
+        outsideSince = nil
+        destroyRing()
     end))
 
     table.insert(connections,RunService.Heartbeat:Connect(function()
@@ -212,83 +281,55 @@ local function run()
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not hrp or not hum or hum.Health <= 0 then clearMovementState(); return end
+        if not hrp or not hum or hum.Health <= 0 then return end
 
         -- Seat state transitions can produce legitimate position/velocity changes.
         local seatState = hum.SeatPart ~= nil
         if seatState ~= lastSeatState then
             lastSeatState = seatState
-            clearMovementState()
             return
         end
         if seatState then
-            clearMovementState()
             stuckAnchorPos = nil
             stuckSince = now
+            outsideSince = nil
+            destroyRing()
             return
         end
 
-        -- Reset if the character has not moved at least MinMoveStuds from
-        -- the current anchor for StuckSeconds. Re-anchor after sufficient travel.
+        -- The visible ring stays fixed at its anchor. If the player remains
+        -- inside it for 60s, reset. After leaving it, wait 10s, then place a new
+        -- ring at the player's current position and restart the 60s timer.
         if not stuckAnchorPos then
             stuckAnchorPos = hrp.Position
             stuckSince = now
-        elseif Vector3.new(
+            outsideSince = nil
+            createRing(stuckAnchorPos)
+        end
+
+        local horizontalDistance = Vector3.new(
             hrp.Position.X - stuckAnchorPos.X,
             0,
             hrp.Position.Z - stuckAnchorPos.Z
-        ).Magnitude >= CONFIG.MinMoveStuds then
-            stuckAnchorPos = hrp.Position
-            stuckSince = now
-        elseif now - stuckSince >= CONFIG.StuckSeconds then
-            resetCharacter("stuck-or-insufficient-movement-60s")
-            return
-        end
+        ).Magnitude
 
-        if hrp ~= lastHrp then
-            lastHrp, lastPos, lastDelta = hrp, hrp.Position, nil
-            reversals = {}
-            pendingSince = nil
-            return
-        end
-
-        local pos = hrp.Position
-        local rawDelta = pos-lastPos
-        lastPos = pos
-        -- Ignore vertical movement; only measure horizontal X/Z displacement.
-        local delta = Vector3.new(rawDelta.X, 0, rawDelta.Z)
-
-        -- Only consider meaningful horizontal movement; ignore tiny physics jitter.
-        if delta.Magnitude >= CONFIG.JitterStuds then
-            if lastDelta and lastDelta.Magnitude >= CONFIG.JitterStuds
-                and delta:Dot(lastDelta) < 0 then
-                table.insert(reversals,now)
-            end
-            lastDelta = delta
-        elseif delta.Magnitude < 0.5 then
-            lastDelta = nil
-        end
-
-        while reversals[1] and now-reversals[1] > CONFIG.JitterWindow do
-            table.remove(reversals,1)
-        end
-
-        if #reversals >= CONFIG.JitterCount then
-            if not pendingSince then
-                pendingSince = now
-            elseif now-pendingSince >= CONFIG.ConfirmSeconds then
-                -- Reconfirm: must still be moving and show a fresh reversal.
-                if lastDelta and lastDelta.Magnitude >= CONFIG.JitterStuds
-                    and reversals[#reversals] and now-reversals[#reversals] <= 1 then
-                    resetCharacter("jitter-confirmed")
-                else
-                    pendingSince = nil
-                    reversals = {}
-                end
+        if horizontalDistance >= CONFIG.MinMoveStuds then
+            if not outsideSince then outsideSince = now end
+            if now - outsideSince >= CONFIG.RingRefreshDelay then
+                stuckAnchorPos = hrp.Position
+                stuckSince = now
+                outsideSince = nil
+                createRing(stuckAnchorPos)
             end
         else
-            pendingSince = nil
+            outsideSince = nil
         end
+
+        if now - stuckSince >= CONFIG.StuckSeconds and horizontalDistance < CONFIG.MinMoveStuds then
+            resetCharacter("inside-40-stud-ring-100s")
+            return
+        end
+
     end))
 
     local function updatePlayers()
@@ -326,7 +367,7 @@ local function run()
     gui.Destroying:Connect(function()
         for _,c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     end)
-    notify("HUD v4.6 da chay")
+    notify("HUD v4.8 da chay - chi reset theo vong 8 studs")
 end
 
 local ok,err = xpcall(run,function(e)
