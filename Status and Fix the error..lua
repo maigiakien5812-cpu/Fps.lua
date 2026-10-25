@@ -33,6 +33,12 @@ local CONFIG = {
 	JitterStuds = 3,
 	JitterCount = 20,
 	JitterWindow = 2,
+	CheckSnap = true,    -- bi keo toi roi giat nguoc ve cho cu, lap lai (kieu giat thuong gap)
+	SnapStuds = 3,       -- giat nguoc >= X studs trong 1 khung hinh thi tinh la 1 lan
+	SnapCount = 3,       -- du X lan trong SnapWindow giay thi hop
+	SnapWindow = 8,
+	SnapLookback = 1.5,  -- so sanh voi vi tri cach day X giay
+	DebugSnap = false,   -- true = hien thong bao moi lan bat duoc 1 cu giat (de chinh SnapStuds)
 
 	ScriptURL = "",      -- link RAW cua script nay (de tu chay lai sau khi hop)
 }
@@ -368,6 +374,9 @@ local function run()
 	local reversals = {}
 	local moverSince = nil
 	local nextMoverCheck = 0
+	local snapHrp = nil
+	local history = {}
+	local snaps = {}
 
 	local function triggerConflict(reason)
 		local now = os.clock()
@@ -376,6 +385,7 @@ local function run()
 		end
 		blockedUntil = now + CONFIG.RetrySeconds
 		reversals = {}
+		snaps = {}
 		moverSince = nil
 		warn("[ServerStatsHUD] Xung dot bay (" .. reason .. ") -> doi server ngay")
 		serverHop(true)
@@ -428,6 +438,41 @@ local function run()
 		end
 	end
 
+	-- Kieu giat "keo toi roi giat nguoc ve": vi tri troi dan theo 1 huong vai khung hinh
+	-- roi bi giat nguoc ve gan cho cu trong 1 khung hinh, lap lai nhieu lan.
+	local function checkSnap(hrp, now)
+		if hrp ~= snapHrp then
+			snapHrp = hrp
+			history = {}
+			snaps = {}
+		end
+		local pos = hrp.Position
+		table.insert(history, { now, pos })
+		while history[1] and now - history[1][1] > CONFIG.SnapLookback do
+			table.remove(history, 1)
+		end
+		local n = #history
+		if n < 3 then
+			return
+		end
+		local prev = history[n - 1][2]
+		local delta = pos - prev
+		local drift = prev - history[1][2]
+		local opposing = delta:Dot(drift) < 0
+		if CONFIG.DebugSnap and opposing and delta.Magnitude >= 1 and drift.Magnitude >= 0.5 then
+			notify(string.format("snap %.1f studs (troi %.1f)", delta.Magnitude, drift.Magnitude))
+		end
+		if opposing and delta.Magnitude >= CONFIG.SnapStuds and drift.Magnitude >= CONFIG.SnapStuds * 0.5 then
+			table.insert(snaps, now)
+		end
+		while snaps[1] and now - snaps[1] > CONFIG.SnapWindow do
+			table.remove(snaps, 1)
+		end
+		if #snaps >= CONFIG.SnapCount then
+			triggerConflict("snap-back")
+		end
+	end
+
 	table.insert(connections, RunService.Heartbeat:Connect(function()
 		if not CONFIG.ConflictHop or not hopEnabled then
 			return
@@ -446,6 +491,9 @@ local function run()
 		if CONFIG.CheckJitter then
 			checkJitter(hrp, now)
 		end
+		if CONFIG.CheckSnap then
+			checkSnap(hrp, now)
+		end
 		if CONFIG.CheckMovers and now >= nextMoverCheck then
 			nextMoverCheck = now + 0.5
 			checkMovers(char, now)
@@ -461,6 +509,8 @@ local function run()
 			retryAt = 0
 			nextHop = os.clock() + INTERVAL
 			reversals = {}
+			snaps = {}
+			history = {}
 			moverSince = nil
 			lastHrp = nil
 			hopLabel.Text = "Hop " .. formatTime(INTERVAL)
