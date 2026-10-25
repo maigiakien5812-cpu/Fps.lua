@@ -18,7 +18,7 @@ local CONFIG = {
 
     IgnoreAfterSeatSeconds = 3,
     IgnoreAfterSpawnSeconds = 5,
-    StuckSeconds = 100,
+    StuckSeconds = 60,
     MinMoveStuds = 70,
     RingSegments = 72,
     RingDotSize = 0.7,
