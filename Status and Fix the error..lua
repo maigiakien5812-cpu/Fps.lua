@@ -1,8 +1,6 @@
---[[
-	Server Stats HUD v2
-	Hiện: số người (SV) | FPS | Ping | đếm ngược hop server
-	Tự hop server mới mỗi 20 phút. Có nút thu gọn trượt ngang (mặc định mở).
-]]
+-- Server Stats HUD v3: SV | FPS | Ping | Hop
+-- Tu hop server moi 20 phut + phat hien xung dot bay -> hop ngay.
+-- Chay xong se hien thong bao "HUD da chay". Neu loi se hien thong bao loi.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -10,492 +8,485 @@ local Stats = game:GetService("Stats")
 local TweenService = game:GetService("TweenService")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
-
+local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 
--- ================= CẤU HÌNH =================
 local CONFIG = {
-	OffsetX = 172,     -- cách mép trái (px), chỉnh cho nằm sát nút chat
-	OffsetY = 23,      -- cách mép trên (px)
-	Height = 22,       -- chiều cao thanh
+	OffsetX = 172,       -- cach mep trai (px), chinh cho sat nut chat
+	OffsetY = 23,        -- cach mep tren (px)
+	Height = 22,
 	TextSize = 11,
-	StartOpen = true,  -- mặc định mở
-	UpdateRate = 0.5,  -- giây giữa mỗi lần cập nhật
+	StartOpen = true,    -- mac dinh mo
+	UpdateRate = 0.5,
+	UseHiddenUI = false, -- true = dung gethui() (neu HUD khong hien thi thi de false)
 
-	AutoHop = true,    -- bật/tắt tự hop
-	HopMinutes = 20,   -- hop mỗi bao nhiêu phút
-	RetrySeconds = 10, -- hop lỗi thì thử lại sau bao nhiêu giây (lỗi càng nhiều lần thì chờ càng lâu)
-	MinPlayers = 2,    -- ưu tiên server có từ X người trở lên (server gần trống hay sắp đóng nên dễ lỗi)
+	AutoHop = true,
+	HopMinutes = 20,
+	RetrySeconds = 10,   -- hop loi thi thu lai sau X giay (loi nhieu lan thi cho lau hon)
+	MinPlayers = 2,      -- uu tien server tu X nguoi tro len
 
-	-- Phát hiện xung đột bay (2 script cùng điều khiển nhân vật) -> hop NGAY
-	ConflictHop = true,  -- bật/tắt tính năng này
-	GraceSeconds = 15,   -- bỏ qua X giây đầu sau khi chạy script / vào server mới
-	CheckMovers = true,  -- cách 1: nhân vật có >= 2 BodyVelocity/BodyPosition/... cùng loại
-	MoverSeconds = 3,    -- ...kéo dài liên tục bao nhiêu giây thì tính là xung đột
-	CheckJitter = true,  -- cách 2: nhân vật bị giật qua lại liên tục
-	JitterStuds = 3,     -- mỗi khung hình phải dịch >= X studs mới tính
-	JitterCount = 20,    -- số lần đổi chiều trong JitterWindow giây thì tính là xung đột
+	ConflictHop = true,  -- phat hien xung dot bay -> hop ngay
+	GraceSeconds = 15,   -- bo qua X giay dau
+	CheckMovers = true,  -- co >= 2 BodyVelocity/BodyPosition... cung loai
+	MoverSeconds = 3,
+	CheckJitter = true,  -- nhan vat giat qua lai lien tuc
+	JitterStuds = 3,
+	JitterCount = 20,
 	JitterWindow = 2,
 
-	-- (Tuỳ chọn) link RAW của script này. Điền vào thì sau khi hop script sẽ tự chạy lại
-	-- (cần executor có queue_on_teleport). Để trống nếu executor của bạn có autoexec.
-	ScriptURL = "",
+	ScriptURL = "",      -- link RAW cua script nay (de tu chay lai sau khi hop)
 }
 
-local COLORS = {
-	Good = Color3.fromRGB(80, 255, 120),   -- mạnh
-	Mid  = Color3.fromRGB(255, 205, 60),   -- trung bình
-	Bad  = Color3.fromRGB(255, 70, 70),    -- yếu
-	Text = Color3.fromRGB(255, 255, 255),
-	Back = Color3.fromRGB(20, 20, 25),
-}
-
--- FPS: >=50 mạnh | 30-49 trung bình | <30 yếu
-local function fpsColor(fps)
-	if fps >= 50 then
-		return COLORS.Good
-	elseif fps >= 30 then
-		return COLORS.Mid
-	end
-	return COLORS.Bad
-end
-
--- Ping: <=100 tốt | 101-200 trung bình | >200 yếu
-local function pingColor(ms)
-	if ms <= 100 then
-		return COLORS.Good
-	elseif ms <= 200 then
-		return COLORS.Mid
-	end
-	return COLORS.Bad
-end
-
-local function getPing()
-	local ok, value = pcall(function()
-		return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
-	end)
-	if ok and value then
-		return math.floor(value + 0.5)
-	end
-	return 0
-end
-
-local function formatTime(s)
-	return ("%02d:%02d"):format(math.floor(s / 60), s % 60)
-end
-
--- ================= TẠO GIAO DIỆN =================
-local GUI_NAME = "ServerStatsHUD"
-local connections = {}
-
-local function getParent()
-	local ok, ui = pcall(function()
-		return gethui and gethui()
-	end)
-	if ok and ui then
-		return ui
-	end
-	return LocalPlayer:WaitForChild("PlayerGui")
-end
-
-local parent = getParent()
-local old = parent:FindFirstChild(GUI_NAME)
-if old then
-	old:Destroy()
-end
-
-local gui = Instance.new("ScreenGui")
-gui.Name = GUI_NAME
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
-gui.DisplayOrder = 999
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = parent
-
-local H = CONFIG.Height
-local HOLDER_WIDTH = 224
-
-local root = Instance.new("Frame")
-root.Name = "Root"
-root.BackgroundTransparency = 1
-root.Position = UDim2.fromOffset(CONFIG.OffsetX, CONFIG.OffsetY)
-root.Size = UDim2.fromOffset(H + 3 + HOLDER_WIDTH, H)
-root.Parent = gui
-
--- Nút thu gọn / mở ra
-local toggle = Instance.new("TextButton")
-toggle.Name = "Toggle"
-toggle.AutoButtonColor = false
-toggle.Size = UDim2.fromOffset(H, H)
-toggle.BackgroundColor3 = COLORS.Back
-toggle.BackgroundTransparency = 0.3
-toggle.BorderSizePixel = 0
-toggle.Font = Enum.Font.GothamBold
-toggle.TextSize = 14
-toggle.TextColor3 = COLORS.Text
-toggle.Text = "<"
-toggle.ZIndex = 3
-toggle.Parent = root
-
-local toggleCorner = Instance.new("UICorner")
-toggleCorner.CornerRadius = UDim.new(0, 6)
-toggleCorner.Parent = toggle
-
--- Khung cắt: phần nội dung trượt vào/ra trong khung này
-local holder = Instance.new("Frame")
-holder.Name = "Holder"
-holder.BackgroundTransparency = 1
-holder.ClipsDescendants = true
-holder.Position = UDim2.fromOffset(H + 3, 0)
-holder.Size = UDim2.fromOffset(HOLDER_WIDTH, H)
-holder.Parent = root
-
-local content = Instance.new("Frame")
-content.Name = "Content"
-content.BackgroundColor3 = COLORS.Back
-content.BackgroundTransparency = 0.3
-content.BorderSizePixel = 0
-content.Size = UDim2.fromScale(1, 1)
-content.Parent = holder
-
-local contentCorner = Instance.new("UICorner")
-contentCorner.CornerRadius = UDim.new(0, 6)
-contentCorner.Parent = content
-
-local layout = Instance.new("UIListLayout")
-layout.FillDirection = Enum.FillDirection.Horizontal
-layout.VerticalAlignment = Enum.VerticalAlignment.Center
-layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
-layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Padding = UDim.new(0, 2)
-layout.Parent = content
-
-local pad = Instance.new("UIPadding")
-pad.PaddingLeft = UDim.new(0, 6)
-pad.PaddingRight = UDim.new(0, 6)
-pad.Parent = content
-
-local function makeLabel(order, width)
-	local l = Instance.new("TextLabel")
-	l.LayoutOrder = order
-	l.BackgroundTransparency = 1
-	l.Size = UDim2.new(0, width, 1, 0)
-	l.Font = Enum.Font.GothamBold
-	l.TextSize = CONFIG.TextSize
-	l.TextColor3 = COLORS.Text
-	l.TextXAlignment = Enum.TextXAlignment.Center
-	l.Text = "..."
-	l.Parent = content
-	return l
-end
-
-local playersLabel = makeLabel(1, 54)
-local fpsLabel = makeLabel(2, 48)
-local pingLabel = makeLabel(3, 42)
-local hopLabel = makeLabel(4, 62)
-
--- ================= THU GỌN / MỞ RA =================
-local isOpen = CONFIG.StartOpen
-local OPEN_POS = UDim2.new(0, 0, 0, 0)
-local CLOSED_POS = UDim2.new(-1, -8, 0, 0)
-local tweenInfo = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-
-local function applyState(animate)
-	local target = isOpen and OPEN_POS or CLOSED_POS
-	toggle.Text = isOpen and "<" or ">"
-	if animate then
-		TweenService:Create(content, tweenInfo, { Position = target }):Play()
-	else
-		content.Position = target
-	end
-end
-
-applyState(false)
-
-table.insert(connections, toggle.Activated:Connect(function()
-	isOpen = not isOpen
-	applyState(true)
-end))
-
--- ================= HOP SERVER =================
-local INTERVAL = math.max(1, CONFIG.HopMinutes) * 60
-local nextHop = os.clock() + INTERVAL
-local hopping = false
-local failedIds = {}  -- server đã thử mà bị từ chối -> không chọn lại
-local attempts = 0    -- số lần hop lỗi liên tiếp
-local lastTarget      -- server vừa thử
-local retryAt = 0     -- chưa được hop lại trước mốc này
-
-local function queueScript()
-	if CONFIG.ScriptURL == "" then
-		return
-	end
+local function notify(text)
 	pcall(function()
-		local queue = queue_on_teleport
-			or (syn and syn.queue_on_teleport)
-			or (fluxus and fluxus.queue_on_teleport)
-		if queue then
-			queue(('loadstring(game:HttpGet("%s"))()'):format(CONFIG.ScriptURL))
-		end
+		StarterGui:SetCore("SendNotification", { Title = "Server HUD", Text = text, Duration = 5 })
 	end)
 end
 
-local function pickServer()
-	local target
-	local ok, err = pcall(function()
-		local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true")
-			:format(game.PlaceId)
-		local data = HttpService:JSONDecode(game:HttpGet(url))
-		local strict, loose = {}, {}
-		for _, s in ipairs(data.data or {}) do
-			if s.id ~= game.JobId
-				and not failedIds[s.id]
-				and s.playing and s.maxPlayers
-				and s.playing < s.maxPlayers then
-				table.insert(loose, s.id)
-				-- server "đẹp": không quá trống, còn dư chỗ để khỏi đầy lúc đang vào
-				if s.playing >= CONFIG.MinPlayers and s.playing <= s.maxPlayers - 2 then
-					table.insert(strict, s.id)
-				end
-			end
-		end
-		local pool = #strict > 0 and strict or loose
-		if #pool > 0 then
-			target = pool[math.random(#pool)]
-		end
-	end)
-	if not ok then
-		warn("[ServerStatsHUD] Lay danh sach server loi: " .. tostring(err))
-	end
-	return target
-end
+local function run()
+	local GUI_NAME = "ServerStatsHUD"
+	local connections = {}
 
-local function serverHop(conflict)
-	if hopping then
-		return
-	end
-	hopping = true
-	hopLabel.Text = conflict and "Conflict!" or "Hop..."
-	hopLabel.TextColor3 = conflict and COLORS.Bad or COLORS.Mid
+	local COLORS = {
+		Good = Color3.fromRGB(80, 255, 120),
+		Mid = Color3.fromRGB(255, 205, 60),
+		Bad = Color3.fromRGB(255, 70, 70),
+		Text = Color3.fromRGB(255, 255, 255),
+		Back = Color3.fromRGB(20, 20, 25),
+	}
 
-	task.spawn(function()
-		-- sau 3 lần lỗi liên tiếp thì bỏ qua danh sách, dùng teleport thường cho chắc
-		local target
-		if attempts < 3 then
-			target = pickServer()
+	local function fpsColor(fps)
+		if fps >= 50 then
+			return COLORS.Good
+		elseif fps >= 30 then
+			return COLORS.Mid
 		end
-		lastTarget = target
-		queueScript()
-		if target then
-			pcall(function()
-				TeleportService:TeleportToPlaceInstance(game.PlaceId, target, LocalPlayer)
-			end)
+		return COLORS.Bad
+	end
+
+	local function pingColor(ms)
+		if ms <= 100 then
+			return COLORS.Good
+		elseif ms <= 200 then
+			return COLORS.Mid
+		end
+		return COLORS.Bad
+	end
+
+	local function getPing()
+		local ok, value = pcall(function()
+			return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+		end)
+		if ok and value then
+			return math.floor(value + 0.5)
+		end
+		return 0
+	end
+
+	local function formatTime(s)
+		return string.format("%02d:%02d", math.floor(s / 60), s % 60)
+	end
+
+	-- ============ GIAO DIEN ============
+	local function make(class, props, parent)
+		local inst = Instance.new(class)
+		for k, v in pairs(props) do
+			inst[k] = v
+		end
+		inst.Parent = parent
+		return inst
+	end
+
+	local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+	local parent = playerGui
+	if CONFIG.UseHiddenUI then
+		local ok, ui = pcall(function()
+			return gethui and gethui()
+		end)
+		if ok and ui then
+			parent = ui
+		end
+	end
+	for _, p in ipairs({ playerGui, parent }) do
+		local old = p:FindFirstChild(GUI_NAME)
+		if old then
+			old:Destroy()
+		end
+	end
+
+	local H = CONFIG.Height
+	local HOLDER_WIDTH = 224
+
+	local gui = make("ScreenGui", {
+		Name = GUI_NAME,
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = 999,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, parent)
+
+	local root = make("Frame", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(CONFIG.OffsetX, CONFIG.OffsetY),
+		Size = UDim2.fromOffset(H + 3 + HOLDER_WIDTH, H),
+	}, gui)
+
+	local toggle = make("TextButton", {
+		AutoButtonColor = false,
+		Size = UDim2.fromOffset(H, H),
+		BackgroundColor3 = COLORS.Back,
+		BackgroundTransparency = 0.3,
+		BorderSizePixel = 0,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = COLORS.Text,
+		Text = "<",
+		ZIndex = 3,
+	}, root)
+	make("UICorner", { CornerRadius = UDim.new(0, 6) }, toggle)
+
+	local holder = make("Frame", {
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		Position = UDim2.fromOffset(H + 3, 0),
+		Size = UDim2.fromOffset(HOLDER_WIDTH, H),
+	}, root)
+
+	local content = make("Frame", {
+		BackgroundColor3 = COLORS.Back,
+		BackgroundTransparency = 0.3,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+	}, holder)
+	make("UICorner", { CornerRadius = UDim.new(0, 6) }, content)
+	make("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Padding = UDim.new(0, 2),
+	}, content)
+	make("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, content)
+
+	local function makeLabel(order, width)
+		return make("TextLabel", {
+			LayoutOrder = order,
+			BackgroundTransparency = 1,
+			Size = UDim2.new(0, width, 1, 0),
+			Font = Enum.Font.GothamBold,
+			TextSize = CONFIG.TextSize,
+			TextColor3 = COLORS.Text,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Text = "...",
+		}, content)
+	end
+
+	local playersLabel = makeLabel(1, 54)
+	local fpsLabel = makeLabel(2, 48)
+	local pingLabel = makeLabel(3, 42)
+	local hopLabel = makeLabel(4, 62)
+
+	-- ============ THU GON / MO RA ============
+	local isOpen = CONFIG.StartOpen
+	local OPEN_POS = UDim2.new(0, 0, 0, 0)
+	local CLOSED_POS = UDim2.new(-1, -8, 0, 0)
+	local tweenInfo = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+	local function applyState(animate)
+		local target = isOpen and OPEN_POS or CLOSED_POS
+		toggle.Text = isOpen and "<" or ">"
+		if animate then
+			TweenService:Create(content, tweenInfo, { Position = target }):Play()
 		else
-			-- không lấy được danh sách server -> teleport thường
-			pcall(function()
-				TeleportService:Teleport(game.PlaceId, LocalPlayer)
-			end)
+			content.Position = target
 		end
+	end
+	applyState(false)
 
-		-- nếu 20s sau vẫn chưa đi được thì thử lại
-		task.delay(20, function()
-			if hopping then
-				-- 20s mà vẫn chưa đi được: coi như hop lỗi (kể cả khi Roblox không báo lỗi)
-				attempts += 1
-				if lastTarget then
-					failedIds[lastTarget] = true
-				end
-				local wait = math.min(CONFIG.RetrySeconds * attempts, 60)
-				hopping = false
-				nextHop = os.clock() + wait
-				retryAt = os.clock() + wait
+	table.insert(connections, toggle.Activated:Connect(function()
+		isOpen = not isOpen
+		applyState(true)
+	end))
+
+	-- ============ HOP SERVER ============
+	local nextHop = os.clock() + math.max(1, CONFIG.HopMinutes) * 60
+	local hopping = false
+	local hopId = 0
+	local failedIds = {}
+	local attempts = 0
+	local lastTarget = nil
+	local retryAt = 0
+
+	local function queueScript()
+		if CONFIG.ScriptURL == "" then
+			return
+		end
+		pcall(function()
+			local queue = queue_on_teleport
+				or (syn and syn.queue_on_teleport)
+				or (fluxus and fluxus.queue_on_teleport)
+			if queue then
+				queue('loadstring(game:HttpGet("' .. CONFIG.ScriptURL .. '"))()')
 			end
 		end)
-	end)
-end
-
-table.insert(connections, TeleportService.TeleportInitFailed:Connect(function(_, result, message)
-	attempts += 1
-	if lastTarget then
-		failedIds[lastTarget] = true
 	end
-	warn(("[ServerStatsHUD] Hop loi lan %d (%s): %s"):format(attempts, tostring(result), tostring(message)))
-	local wait = math.min(CONFIG.RetrySeconds * attempts, 60) -- 10s, 20s, 30s... tối đa 60s
-	hopping = false
-	nextHop = os.clock() + wait
-	retryAt = os.clock() + wait
-end))
 
--- ================= PHÁT HIỆN XUNG ĐỘT BAY =================
-local MOVER_CLASSES = {
-	BodyVelocity = true,
-	BodyPosition = true,
-	BodyGyro = true,
-	LinearVelocity = true,
-	AlignPosition = true,
-}
-
-local startTime = os.clock()
-local blockedUntil = 0
-local lastHrp, lastPos, lastDelta
-local reversals = {}
-local moverSince
-local nextMoverCheck = 0
-
-local function triggerConflict(reason)
-	local now = os.clock()
-	if hopping or now < blockedUntil or now < retryAt then
-		return
+	local function pickServer()
+		local target = nil
+		local ok, err = pcall(function()
+			local url = string.format(
+				"https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true",
+				game.PlaceId
+			)
+			local data = HttpService:JSONDecode(game:HttpGet(url))
+			local strict, loose = {}, {}
+			for _, s in ipairs(data.data or {}) do
+				if s.id ~= game.JobId
+					and not failedIds[s.id]
+					and s.playing and s.maxPlayers
+					and s.playing < s.maxPlayers then
+					table.insert(loose, s.id)
+					if s.playing >= CONFIG.MinPlayers and s.playing <= s.maxPlayers - 2 then
+						table.insert(strict, s.id)
+					end
+				end
+			end
+			local pool = #strict > 0 and strict or loose
+			if #pool > 0 then
+				target = pool[math.random(#pool)]
+			end
+		end)
+		if not ok then
+			warn("[ServerStatsHUD] Lay danh sach server loi: " .. tostring(err))
+		end
+		return target
 	end
-	blockedUntil = now + CONFIG.RetrySeconds
-	reversals = {}
-	moverSince = nil
-	warn("[ServerStatsHUD] Xung dot bay (" .. reason .. ") -> doi server ngay")
-	serverHop(true)
-end
 
--- Cách 1: có từ 2 mover cùng loại trên nhân vật liên tục (2 script cùng gắn lực bay)
-local function checkMovers(char, now)
-	local counts = {}
-	local dupClass
-	for _, d in ipairs(char:GetDescendants()) do
-		if MOVER_CLASSES[d.ClassName] then
-			counts[d.ClassName] = (counts[d.ClassName] or 0) + 1
-			if counts[d.ClassName] >= 2 then
-				dupClass = d.ClassName
-				break
+	local function onHopFailed(reason)
+		attempts = attempts + 1
+		if lastTarget then
+			failedIds[lastTarget] = true
+		end
+		warn("[ServerStatsHUD] Hop loi lan " .. attempts .. ": " .. tostring(reason))
+		local delayTime = math.min(CONFIG.RetrySeconds * attempts, 60)
+		hopping = false
+		nextHop = os.clock() + delayTime
+		retryAt = nextHop
+	end
+
+	local function serverHop(conflict)
+		if hopping then
+			return
+		end
+		hopping = true
+		hopId = hopId + 1
+		local myId = hopId
+		hopLabel.Text = conflict and "Conflict!" or "Hop..."
+		hopLabel.TextColor3 = conflict and COLORS.Bad or COLORS.Mid
+
+		task.spawn(function()
+			local target = nil
+			if attempts < 3 then
+				target = pickServer()
+			end
+			lastTarget = target
+			queueScript()
+			pcall(function()
+				if target then
+					TeleportService:TeleportToPlaceInstance(game.PlaceId, target, LocalPlayer)
+				else
+					TeleportService:Teleport(game.PlaceId, LocalPlayer)
+				end
+			end)
+			task.delay(20, function()
+				if hopping and hopId == myId then
+					onHopFailed("qua 20s chua di duoc")
+				end
+			end)
+		end)
+	end
+
+	table.insert(connections, TeleportService.TeleportInitFailed:Connect(function(_, result, message)
+		onHopFailed(tostring(result) .. " | " .. tostring(message))
+	end))
+
+	-- ============ PHAT HIEN XUNG DOT BAY ============
+	local MOVER_CLASSES = {
+		BodyVelocity = true,
+		BodyPosition = true,
+		BodyGyro = true,
+		LinearVelocity = true,
+		AlignPosition = true,
+	}
+	local startTime = os.clock()
+	local blockedUntil = 0
+	local lastHrp, lastPos, lastDelta = nil, nil, nil
+	local reversals = {}
+	local moverSince = nil
+	local nextMoverCheck = 0
+
+	local function triggerConflict(reason)
+		local now = os.clock()
+		if hopping or now < blockedUntil or now < retryAt then
+			return
+		end
+		blockedUntil = now + CONFIG.RetrySeconds
+		reversals = {}
+		moverSince = nil
+		warn("[ServerStatsHUD] Xung dot bay (" .. reason .. ") -> doi server ngay")
+		serverHop(true)
+	end
+
+	local function checkMovers(char, now)
+		local counts = {}
+		local dupClass = nil
+		for _, d in ipairs(char:GetDescendants()) do
+			if MOVER_CLASSES[d.ClassName] then
+				counts[d.ClassName] = (counts[d.ClassName] or 0) + 1
+				if counts[d.ClassName] >= 2 then
+					dupClass = d.ClassName
+					break
+				end
 			end
 		end
-	end
-	if dupClass then
-		moverSince = moverSince or now
-		if now - moverSince >= CONFIG.MoverSeconds then
-			triggerConflict("2x " .. dupClass)
+		if dupClass then
+			moverSince = moverSince or now
+			if now - moverSince >= CONFIG.MoverSeconds then
+				triggerConflict("2x " .. dupClass)
+			end
+		else
+			moverSince = nil
 		end
-	else
-		moverSince = nil
 	end
-end
 
--- Cách 2: vị trí giật qua lại liên tục (2 script kéo nhân vật về 2 hướng khác nhau)
-local function checkJitter(hrp, now)
-	local pos = hrp.Position
-	if hrp ~= lastHrp then
-		lastHrp, lastPos, lastDelta = hrp, pos, nil
-		reversals = {}
-		return
-	end
-	local delta = pos - lastPos
-	lastPos = pos
-	if delta.Magnitude >= CONFIG.JitterStuds then
-		if lastDelta and delta:Dot(lastDelta) < 0 then
-			table.insert(reversals, now)
+	local function checkJitter(hrp, now)
+		local pos = hrp.Position
+		if hrp ~= lastHrp then
+			lastHrp, lastPos, lastDelta = hrp, pos, nil
+			reversals = {}
+			return
 		end
-		lastDelta = delta
-	else
-		lastDelta = nil
+		local delta = pos - lastPos
+		lastPos = pos
+		if delta.Magnitude >= CONFIG.JitterStuds then
+			if lastDelta and delta:Dot(lastDelta) < 0 then
+				table.insert(reversals, now)
+			end
+			lastDelta = delta
+		else
+			lastDelta = nil
+		end
+		while reversals[1] and now - reversals[1] > CONFIG.JitterWindow do
+			table.remove(reversals, 1)
+		end
+		if #reversals >= CONFIG.JitterCount then
+			triggerConflict("jitter")
+		end
 	end
-	while reversals[1] and now - reversals[1] > CONFIG.JitterWindow do
-		table.remove(reversals, 1)
+
+	table.insert(connections, RunService.Heartbeat:Connect(function()
+		if not CONFIG.ConflictHop then
+			return
+		end
+		local now = os.clock()
+		if now - startTime < CONFIG.GraceSeconds then
+			return
+		end
+		local char = LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not (hrp and hum) or hum.Health <= 0 then
+			lastHrp = nil
+			return
+		end
+		if CONFIG.CheckJitter then
+			checkJitter(hrp, now)
+		end
+		if CONFIG.CheckMovers and now >= nextMoverCheck then
+			nextMoverCheck = now + 0.5
+			checkMovers(char, now)
+		end
+	end))
+
+	-- ============ CAP NHAT SO LIEU ============
+	local function updatePlayers()
+		playersLabel.Text = string.format("SV %d/%d", #Players:GetPlayers(), Players.MaxPlayers)
 	end
-	if #reversals >= CONFIG.JitterCount then
-		triggerConflict("jitter")
+
+	local function updatePing()
+		local ms = getPing()
+		pingLabel.Text = ms .. "ms"
+		pingLabel.TextColor3 = pingColor(ms)
 	end
+
+	local function updateFps(fps)
+		fps = math.floor(fps + 0.5)
+		fpsLabel.Text = "FPS " .. fps
+		fpsLabel.TextColor3 = fpsColor(fps)
+	end
+
+	local function updateHop()
+		if not CONFIG.AutoHop then
+			hopLabel.Text = "Hop off"
+			hopLabel.TextColor3 = COLORS.Text
+			return
+		end
+		if hopping then
+			return
+		end
+		local remaining = math.max(0, math.ceil(nextHop - os.clock()))
+		hopLabel.Text = "Hop " .. formatTime(remaining)
+		if remaining <= 10 then
+			hopLabel.TextColor3 = COLORS.Bad
+		elseif remaining <= 60 then
+			hopLabel.TextColor3 = COLORS.Mid
+		else
+			hopLabel.TextColor3 = COLORS.Text
+		end
+		if remaining <= 0 and os.clock() >= retryAt then
+			serverHop(false)
+		end
+	end
+
+	updatePlayers()
+	updatePing()
+	updateFps(60)
+	updateHop()
+
+	local frames = 0
+	local last = os.clock()
+	table.insert(connections, RunService.RenderStepped:Connect(function()
+		frames = frames + 1
+		local now = os.clock()
+		local dt = now - last
+		if dt >= CONFIG.UpdateRate then
+			updateFps(frames / dt)
+			updatePing()
+			updatePlayers()
+			updateHop()
+			frames = 0
+			last = now
+		end
+	end))
+
+	table.insert(connections, Players.PlayerAdded:Connect(updatePlayers))
+	table.insert(connections, Players.PlayerRemoving:Connect(function()
+		task.defer(updatePlayers)
+	end))
+
+	gui.Destroying:Connect(function()
+		for _, c in ipairs(connections) do
+			c:Disconnect()
+		end
+	end)
+
+	notify("HUD da chay")
 end
 
-table.insert(connections, RunService.Heartbeat:Connect(function()
-	if not CONFIG.ConflictHop then
-		return
-	end
-	local now = os.clock()
-	if now - startTime < CONFIG.GraceSeconds then
-		return
-	end
-	local char = LocalPlayer.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if not (hrp and hum) or hum.Health <= 0 then
-		lastHrp = nil
-		return
-	end
-	if CONFIG.CheckJitter then
-		checkJitter(hrp, now)
-	end
-	if CONFIG.CheckMovers and now >= nextMoverCheck then
-		nextMoverCheck = now + 0.5
-		checkMovers(char, now)
-	end
-end))
-
--- ================= CẬP NHẬT SỐ LIỆU =================
-local function updatePlayers()
-	playersLabel.Text = ("SV %d/%d"):format(#Players:GetPlayers(), Players.MaxPlayers)
-end
-
-local function updatePing()
-	local ms = getPing()
-	pingLabel.Text = ("%dms"):format(ms)
-	pingLabel.TextColor3 = pingColor(ms)
-end
-
-local function updateFps(fps)
-	fps = math.floor(fps + 0.5)
-	fpsLabel.Text = ("FPS %d"):format(fps)
-	fpsLabel.TextColor3 = fpsColor(fps)
-end
-
-local function updateHop()
-	if not CONFIG.AutoHop then
-		hopLabel.Text = "Hop off"
-		hopLabel.TextColor3 = COLORS.Text
-		return
-	end
-	if hopping then
-		return
-	end
-	local remaining = math.max(0, math.ceil(nextHop - os.clock()))
-	hopLabel.Text = "Hop " .. formatTime(remaining)
-	if remaining <= 10 then
-		hopLabel.TextColor3 = COLORS.Bad
-	elseif remaining <= 60 then
-		hopLabel.TextColor3 = COLORS.Mid
-	else
-		hopLabel.TextColor3 = COLORS.Text
-	end
-	if remaining <= 0 then
-		serverHop()
-	end
-end
-
-updatePlayers()
-updatePing()
-updateFps(60)
-updateHop()
-
-local frames = 0
-local last = os.clock()
-
-table.insert(connections, RunService.RenderStepped:Connect(function()
-	frames += 1
-	local now = os.clock()
-	local dt = now - last
-	if dt >= CONFIG.UpdateRate then
-		updateFps(frames / dt)
-		updatePing()
-		updatePlayers()
-		updateHop()
-		frames = 0
-		last = now
-	end
-end))
-
-table.insert(connections, Players.PlayerAdded:Connect(updatePlayers))
-table.insert(connections, Players.PlayerRemoving:Connect(function()
-	task.defer(updatePlayers)
-end))
-
-gui.Destroying:Connect(function()
-	for _, c in ipairs(connections) do
-		c:Disconnect()
-	end
+local ok, err = xpcall(run, function(e)
+	return tostring(e) .. "\n" .. tostring(debug.traceback())
 end)
+if not ok then
+	warn("[ServerStatsHUD] LOI: " .. tostring(err))
+	notify("Loi: " .. string.sub(tostring(err), 1, 150))
+end
